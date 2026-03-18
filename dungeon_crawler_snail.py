@@ -1,0 +1,837 @@
+# dungeon_crawler_snail.py
+import time
+import random
+import json
+import os
+from collections import deque
+
+class RandomDungeon:
+    def __init__(self, stats_manager):
+        self.stats_manager = stats_manager
+        self.stats = stats_manager.stats
+        self.player_x = 1
+        self.player_y = 1
+        
+        self.running = True
+        self.message = "Welcome to RANDOM dungeon! Watch out for FIRE and the SNAIL!"
+        self.steps_taken = 0
+        self.treasure_found = 0
+        self.game_over = False
+        self.death_message = ""
+        self.death_cause = None  # 'fire' or 'snail'
+        
+        # Fire cycle tracking
+        self.fire_cycle = 0
+        self.fire_timer = 0
+        
+        # Snail tracking
+        self.snail_active = False  # Snail appears at dungeon 7
+        self.snail_x = -1
+        self.snail_y = -1
+        self.snail_move_counter = 0
+        self.snail_speed = 10  # Moves once every 10 player turns initially
+        self.snail_level_appeared = 7
+        
+        self.width = 12
+        self.height = 12
+        
+        self.world = [[0 for _ in range(self.width)] for _ in range(self.height)]
+        self.fire_map = [[False for _ in range(self.width)] for _ in range(self.height)]
+        self.monster_positions = []
+        self.generate_dungeon()
+        
+        # Activate snail if dungeon count >= 7
+        self.check_snail_activation()
+    
+    def check_snail_activation(self):
+        """Activate snail based on dungeon count"""
+        dungeon_num = self.stats['dungeons_completed'] + 1
+        if dungeon_num >= self.snail_level_appeared:
+            self.snail_active = True
+            self.calculate_snail_speed(dungeon_num)
+            self.place_snail()
+    
+    def calculate_snail_speed(self, dungeon_num):
+        """Calculate snail speed based on dungeon level"""
+        # Start at 10 turns per move at level 7
+        # Decrease by 1 every 5 levels until minimum 3
+        levels_above_7 = max(0, dungeon_num - 7)
+        speed_reduction = levels_above_7 // 5
+        self.snail_speed = max(3, 10 - speed_reduction)
+    
+    def place_snail(self):
+        """Place snail in a random open space"""
+        attempts = 0
+        while attempts < 100:
+            x = random.randint(2, self.width-3)
+            y = random.randint(2, self.height-3)
+            
+            # Check if space is empty, not player start, not exit, not monster, not treasure
+            if (self.world[y][x] == 0 and 
+                (x, y) != (1, 1) and 
+                (x, y) != (self.width-2, self.height-2) and
+                not any((x, y) == (mx, my) for mx, my in self.monster_positions)):
+                
+                # Also check not too close to player
+                if abs(x - self.player_x) + abs(y - self.player_y) > 3:
+                    self.snail_x, self.snail_y = x, y
+                    return
+            attempts += 1
+        
+        # Fallback - place near edge if can't find good spot
+        self.snail_x, self.snail_y = 2, 2
+    
+    def move_snail(self):
+        """Move snail toward player using BFS pathfinding"""
+        if not self.snail_active or self.snail_x == -1:
+            return
+        
+        # Check if snail touches player
+        if self.snail_x == self.player_x and self.snail_y == self.player_y:
+            self.game_over = True
+            self.death_cause = 'snail'
+            self.death_message = "🐌 The snail caught you! SLIME DEATH! 🐌"
+            return
+        
+        # Use BFS to find path to player
+        path = self.find_path_to_player()
+        
+        if path and len(path) > 1:
+            # Move to next cell in path
+            next_x, next_y = path[1]
+            
+            # Check if next cell is valid (not wall, not monster, not fire)
+            if (self.world[next_y][next_x] != 1 and 
+                self.world[next_y][next_x] != 3 and
+                not self.fire_map[next_y][next_x]):
+                
+                self.snail_x, self.snail_y = next_x, next_y
+                
+                # Check again if snail caught player after moving
+                if self.snail_x == self.player_x and self.snail_y == self.player_y:
+                    self.game_over = True
+                    self.death_cause = 'snail'
+                    self.death_message = "🐌 The snail caught you! SLIME DEATH! 🐌"
+    
+    def find_path_to_player(self):
+        """BFS pathfinding from snail to player"""
+        from collections import deque
+        
+        if self.snail_x == -1:
+            return None
+        
+        queue = deque([(self.snail_x, self.snail_y, [(self.snail_x, self.snail_y)])])
+        visited = {(self.snail_x, self.snail_y)}
+        
+        while queue:
+            x, y, path = queue.popleft()
+            
+            if x == self.player_x and y == self.player_y:
+                return path
+            
+            # Check all 4 directions
+            for dx, dy in [(1,0), (-1,0), (0,1), (0,-1)]:
+                new_x, new_y = x + dx, y + dy
+                
+                if (0 <= new_x < self.width and 0 <= new_y < self.height and
+                    (new_x, new_y) not in visited):
+                    
+                    # Can move through empty spaces, treasure, exit
+                    if (self.world[new_y][new_x] != 1 and  # Not wall
+                        self.world[new_y][new_x] != 3):    # Not monster
+                        
+                        visited.add((new_x, new_y))
+                        new_path = path + [(new_x, new_y)]
+                        queue.append((new_x, new_y, new_path))
+        
+        return None  # No path found
+    
+    def get_avatar(self):
+        """Return the appropriate avatar based on dungeons completed"""
+        completed = self.stats['dungeons_completed']
+        
+        if completed <= 2:
+            return "👤"
+        elif completed <= 7:
+            return "👨‍🎓"
+        elif completed <= 12:
+            return "👩‍🍳"
+        elif completed <= 17:
+            return "👨‍🚒"
+        elif completed <= 23:
+            return "👮‍♂️"
+        elif completed <= 27:
+            return "🥷"
+        elif completed <= 33:
+            return "🧙‍♂️"
+        else:
+            return "🦸‍♂️"
+    
+    def get_avatar_name(self):
+        """Return the name of current avatar"""
+        completed = self.stats['dungeons_completed']
+        
+        if completed <= 2:
+            return "Indistinct Goon"
+        elif completed <= 7:
+            return "Learner"
+        elif completed <= 12:
+            return "Chef"
+        elif completed <= 17:
+            return "Firefighter"
+        elif completed <= 23:
+            return "Police Officer"
+        elif completed <= 27:
+            return "Ninja"
+        elif completed <= 33:
+            return "Wizard"
+        else:
+            return "Superhero"
+    
+    def simple_clear(self):
+        print("\n" + "=" * 50 + "\n")
+    
+    def generate_dungeon(self):
+        """Generate a random but ALWAYS solvable dungeon"""
+        # Create border walls
+        for i in range(self.height):
+            for j in range(self.width):
+                if i == 0 or i == self.height-1 or j == 0 or j == self.width-1:
+                    self.world[i][j] = 1
+        
+        exit_x = self.width - 2
+        exit_y = self.height - 2
+        
+        # Create path
+        path = self.create_path(1, 1, exit_x, exit_y)
+        
+        # Add random walls (never block path)
+        for _ in range(15):
+            while True:
+                x = random.randint(2, self.width-3)
+                y = random.randint(2, self.height-3)
+                if (x, y) not in path and (x, y) != (1, 1):
+                    self.world[y][x] = 1
+                    break
+        
+        # Add treasures on path
+        path_list = list(path)
+        random.shuffle(path_list)
+        
+        treasures_added = 0
+        for x, y in path_list:
+            if treasures_added < 4 and (x, y) != (1, 1) and (x, y) != (exit_x, exit_y):
+                self.world[y][x] = 2
+                treasures_added += 1
+        
+        self.total_treasures = treasures_added
+        
+        # Add monsters (fire creatures)
+        self.monster_positions = []
+        for _ in range(3):
+            attempts = 0
+            while attempts < 50:
+                x = random.randint(2, self.width-3)
+                y = random.randint(2, self.height-3)
+                if (self.world[y][x] == 0 and 
+                    (x, y) != (1, 1) and 
+                    (x, y) != (exit_x, exit_y)):
+                    self.world[y][x] = 3
+                    self.monster_positions.append((x, y))
+                    break
+                attempts += 1
+        
+        # Place exit
+        self.world[exit_y][exit_x] = 4
+        
+        # Ensure player start is empty
+        self.world[1][1] = 0
+    
+    def create_path(self, start_x, start_y, end_x, end_y):
+        """Create a guaranteed path from start to exit"""
+        path = set()
+        current_x, current_y = start_x, start_y
+        path.add((current_x, current_y))
+        
+        attempts = 0
+        max_attempts = 1000
+        
+        while (current_x, current_y) != (end_x, end_y) and attempts < max_attempts:
+            attempts += 1
+            possible_moves = []
+            
+            if current_x < end_x:
+                possible_moves.append((1, 0))
+            if current_x > end_x:
+                possible_moves.append((-1, 0))
+            if current_y < end_y:
+                possible_moves.append((0, 1))
+            if current_y > end_y:
+                possible_moves.append((0, -1))
+            
+            if random.random() < 0.3:
+                possible_moves = [(1,0), (-1,0), (0,1), (0,-1)]
+            
+            random.shuffle(possible_moves)
+            moved = False
+            
+            for dx, dy in possible_moves:
+                new_x = current_x + dx
+                new_y = current_y + dy
+                
+                if (1 <= new_x < self.width-1 and 1 <= new_y < self.height-1):
+                    current_x, current_y = new_x, new_y
+                    path.add((current_x, current_y))
+                    moved = True
+                    break
+            
+            if not moved:
+                for dx, dy in [(1,0), (-1,0), (0,1), (0,-1)]:
+                    new_x = current_x + dx
+                    new_y = current_y + dy
+                    if (1 <= new_x < self.width-1 and 1 <= new_y < self.height-1):
+                        current_x, current_y = new_x, new_y
+                        path.add((current_x, current_y))
+                        break
+        
+        return path
+    
+    def update_fire(self):
+        """Update fire state based on cycle"""
+        self.fire_cycle = (self.fire_cycle + 1) % 6
+        fire_active = (self.fire_cycle < 3)
+        
+        # Clear previous fire
+        for y in range(self.height):
+            for x in range(self.width):
+                self.fire_map[y][x] = False
+        
+        if fire_active:
+            # Create fire around each monster
+            for mx, my in self.monster_positions:
+                directions = [(0, 1), (0, -1), (1, 0), (-1, 0)]
+                for dx, dy in directions:
+                    fx, fy = mx + dx, my + dy
+                    if (0 <= fx < self.width and 0 <= fy < self.height and 
+                        self.world[fy][fx] != 1):
+                        self.fire_map[fy][fx] = True
+            
+            # Check if player is in fire
+            if self.fire_map[self.player_y][self.player_x]:
+                self.game_over = True
+                self.death_cause = 'fire'
+                self.death_message = "💀 You were consumed by fire! 💀"
+    
+    def draw(self):
+        """Draw the game with fire effects and snail"""
+        self.simple_clear()
+        
+        # Update fire first
+        self.update_fire()
+        
+        # Get current avatar
+        avatar = self.get_avatar()
+        avatar_name = self.get_avatar_name()
+        dungeon_num = self.stats['dungeons_completed'] + 1
+        
+        print("🔥🐌 FIREBALL & SNAIL DUNGEON 🐌🔥")
+        print(f"Dungeon #{dungeon_num}")
+        print(f"Avatar: {avatar} {avatar_name}")
+        
+        # Show fire status
+        fire_status = "🔥 ACTIVE" if self.fire_cycle < 3 else "💨 cooling"
+        turns_left = 3 - self.fire_cycle if self.fire_cycle < 3 else 6 - self.fire_cycle
+        print(f"Fire: {fire_status} ({turns_left} turns)")
+        
+        # Show snail status if active
+        if self.snail_active:
+            speed_text = f"moves every {self.snail_speed} turns"
+            print(f"🐌 Snail: {speed_text}")
+        
+        # Draw map
+        for y in range(self.height):
+            row = ""
+            for x in range(self.width):
+                if x == self.player_x and y == self.player_y:
+                    if self.game_over and self.death_cause == 'fire':
+                        row += "💀"
+                    elif self.game_over and self.death_cause == 'snail':
+                        row += "💀"
+                    else:
+                        row += avatar
+                elif self.snail_active and x == self.snail_x and y == self.snail_y:
+                    row += "🐌"  # Snail
+                elif self.fire_map[y][x]:
+                    row += "🔥"
+                elif self.world[y][x] == 1:
+                    row += "🧱"
+                elif self.world[y][x] == 2:
+                    row += "💎"
+                elif self.world[y][x] == 3:
+                    row += "👾"
+                elif self.world[y][x] == 4:
+                    row += "🚪"
+                else:
+                    row += "⬛"
+            print(row)
+        
+        print("-" * 30)
+        print(f"💎 {self.treasure_found}/{self.total_treasures} | 👣 {self.steps_taken}")
+        print(f"🏆 Total Wins: {self.stats['total_wins']}")
+        print(f"⬆️  Next Evolution: {self.next_evolution()}")
+        print(f"💬 {self.message}")
+        self.draw_radar(avatar)
+        print("\nW/A/S/D move | Q quit")
+    
+    def next_evolution(self):
+        """Show progress to next evolution"""
+        completed = self.stats['dungeons_completed']
+        
+        if completed <= 2:
+            return f"{3 - completed} until Learner"
+        elif completed <= 7:
+            return f"{8 - completed} until Chef"
+        elif completed <= 12:
+            return f"{13 - completed} until Firefighter"
+        elif completed <= 17:
+            return f"{18 - completed} until Police"
+        elif completed <= 23:
+            return f"{24 - completed} until Ninja"
+        elif completed <= 27:
+            return f"{28 - completed} until Wizard"
+        elif completed <= 33:
+            return f"{34 - completed} until Superhero"
+        else:
+            return "MAX EVOLUTION! 🏆"
+    
+    def draw_radar(self, avatar):
+        """Draw 5x5 radar around player"""
+        print("\n📡 RADAR:")
+        for dy in range(-2, 3):
+            row = "   "
+            for dx in range(-2, 3):
+                world_x = self.player_x + dx
+                world_y = self.player_y + dy
+                
+                if dx == 0 and dy == 0:
+                    if self.game_over:
+                        row += "💀"
+                    else:
+                        row += avatar
+                elif 0 <= world_x < self.width and 0 <= world_y < self.height:
+                    if self.snail_active and world_x == self.snail_x and world_y == self.snail_y:
+                        row += "🐌"
+                    elif self.fire_map[world_y][world_x]:
+                        row += "🔥"
+                    elif self.world[world_y][world_x] == 1:
+                        row += "🧱"
+                    elif self.world[world_y][world_x] == 2:
+                        row += "💎"
+                    elif self.world[world_y][world_x] == 3:
+                        row += "👾"
+                    elif self.world[world_y][world_x] == 4:
+                        row += "🚪"
+                    else:
+                        row += "⬛"
+                else:
+                    row += "❌"
+            print(row)
+    
+    def move(self, dx, dy):
+        """Move player"""
+        if self.game_over:
+            return
+        
+        new_x = self.player_x + dx
+        new_y = self.player_y + dy
+        
+        if new_x < 0 or new_x >= self.width or new_y < 0 or new_y >= self.height:
+            self.message = "Edge of world!"
+            self.check_snail_move()
+            return
+        
+        if self.world[new_y][new_x] == 1:
+            self.message = "Thump! Wall"
+            self.check_snail_move()
+            return
+        
+        if self.world[new_y][new_x] == 3:
+            self.message = "👾 The fire creature glows hotter!"
+            self.check_snail_move()
+            return
+        
+        # Check if destination is on fire
+        if self.fire_map[new_y][new_x]:
+            self.game_over = True
+            self.death_cause = 'fire'
+            self.death_message = "💀 You stepped into fire and perished! 💀"
+            return
+        
+        # Check if destination has snail
+        if self.snail_active and new_x == self.snail_x and new_y == self.snail_y:
+            self.game_over = True
+            self.death_cause = 'snail'
+            self.death_message = "🐌 You walked into the snail! SLIME DEATH! 🐌"
+            return
+        
+        old_x, old_y = self.player_x, self.player_y
+        self.player_x, self.player_y = new_x, new_y
+        self.steps_taken += 1
+        
+        tile = self.world[new_y][new_x]
+        
+        if tile == 2:
+            self.treasure_found += 1
+            self.message = f"💎 Found treasure! ({self.treasure_found}/{self.total_treasures})"
+            self.world[new_y][new_x] = 0
+            
+        elif tile == 4:
+            if self.treasure_found == self.total_treasures:
+                self.message = "🎉 DUNGEON COMPLETE! 🎉"
+                self.running = False
+            else:
+                self.message = f"🚪 Need {self.total_treasures - self.treasure_found} more!"
+                self.player_x, self.player_y = old_x, old_y
+                self.steps_taken -= 1
+        else:
+            self.message = "Moved"
+        
+        # Check snail movement after player moves
+        self.check_snail_move()
+    
+    def check_snail_move(self):
+        """Check if snail should move based on turn counter"""
+        if not self.snail_active or self.snail_x == -1:
+            return
+        
+        self.snail_move_counter += 1
+        
+        if self.snail_move_counter >= self.snail_speed:
+            self.snail_move_counter = 0
+            self.move_snail()
+    
+    def run(self):
+        """Main game loop for a single dungeon"""
+        while self.running and not self.game_over:
+            self.draw()
+            
+            # Get input
+            cmd = input("\n> ").strip().upper()
+            
+            if cmd == 'Q':
+                self.message = "Quitting dungeon..."
+                self.running = False
+            elif cmd == 'W':
+                self.move(0, -1)
+            elif cmd == 'S':
+                self.move(0, 1)
+            elif cmd == 'A':
+                self.move(-1, 0)
+            elif cmd == 'D':
+                self.move(1, 0)
+            else:
+                self.message = "Use W,A,S,D or Q"
+                self.check_snail_move()  # Snail still moves even on invalid input
+            
+            time.sleep(0.1)
+        
+        # Show death screen if game over
+        if self.game_over:
+            self.simple_clear()
+            print("=" * 50)
+            print(self.death_message)
+            print("=" * 50)
+            print("\nYour adventure ends here...")
+            time.sleep(2)
+
+# [StatsManager, menu functions remain the same as previous version]
+# Include all StatsManager and menu functions from the fireball version
+
+class StatsManager:
+    """Handle saving/loading game statistics"""
+    
+    def __init__(self, filename="dungeon_stats.json"):
+        self.filename = filename
+        self.stats = self.load_stats()
+    
+    def load_stats(self):
+        """Load stats from JSON file"""
+        default_stats = {
+            "total_wins": 0,
+            "dungeons_completed": 0,
+            "total_steps": 0,
+            "total_treasures": 0,
+            "snail_deaths": 0,  # New stat
+            "fire_deaths": 0,    # New stat
+            "best_dungeon": {
+                "steps": float('inf'),
+                "treasures": 0
+            },
+            "win_streak": 0,
+            "last_played": None
+        }
+        
+        if os.path.exists(self.filename):
+            try:
+                with open(self.filename, 'r') as f:
+                    loaded = json.load(f)
+                    # Merge with defaults
+                    for key, value in default_stats.items():
+                        if key not in loaded:
+                            loaded[key] = value
+                    return loaded
+            except:
+                return default_stats
+        return default_stats
+    
+    def save_stats(self):
+        """Save stats to JSON file"""
+        try:
+            with open(self.filename, 'w') as f:
+                json.dump(self.stats, f, indent=2)
+        except:
+            print("⚠️  Could not save stats")
+    
+    def update_after_dungeon(self, steps, treasures, won, death_cause=None):
+        """Update stats after completing a dungeon"""
+        old_completed = self.stats["dungeons_completed"]
+        self.stats["dungeons_completed"] += 1
+        self.stats["total_steps"] += steps
+        self.stats["total_treasures"] += treasures
+        self.stats["last_played"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Track death causes
+        if death_cause == 'snail':
+            self.stats["snail_deaths"] += 1
+        elif death_cause == 'fire':
+            self.stats["fire_deaths"] += 1
+        
+        # Check if avatar evolved
+        new_completed = self.stats["dungeons_completed"]
+        old_avatar = self.get_avatar_name(old_completed)
+        new_avatar = self.get_avatar_name(new_completed)
+        
+        if old_avatar != new_avatar:
+            print(f"\n🌟 CONGRATULATIONS! 🌟")
+            print(f"You evolved from {old_avatar} to {new_avatar}!")
+            time.sleep(2)
+        
+        if won:
+            self.stats["total_wins"] += 1
+            self.stats["win_streak"] += 1
+            
+            # Check if this was a best run
+            if steps < self.stats["best_dungeon"]["steps"]:
+                self.stats["best_dungeon"]["steps"] = steps
+                self.stats["best_dungeon"]["treasures"] = treasures
+        else:
+            self.stats["win_streak"] = 0
+        
+        self.save_stats()
+    
+    def get_avatar_name(self, completed=None):
+        """Return avatar name for a given completion count"""
+        if completed is None:
+            completed = self.stats['dungeons_completed']
+        
+        if completed <= 2:
+            return "Indistinct Goon"
+        elif completed <= 7:
+            return "Learner"
+        elif completed <= 12:
+            return "Chef"
+        elif completed <= 17:
+            return "Firefighter"
+        elif completed <= 23:
+            return "Police Officer"
+        elif completed <= 27:
+            return "Ninja"
+        elif completed <= 33:
+            return "Wizard"
+        else:
+            return "Superhero"
+    
+    def display_stats(self):
+        """Show career statistics with current avatar"""
+        avatar = self.get_avatar_name()
+        
+        print("\n" + "=" * 50)
+        print("📊 CAREER STATISTICS")
+        print("=" * 50)
+        print(f"👤 Current Avatar: {avatar}")
+        print(f"🏆 Total Wins: {self.stats['total_wins']}")
+        print(f"📈 Dungeons Attempted: {self.stats['dungeons_completed']}")
+        print(f"🔥 Current Win Streak: {self.stats['win_streak']}")
+        print(f"👣 Total Steps: {self.stats['total_steps']}")
+        print(f"💎 Total Treasures: {self.stats['total_treasures']}")
+        print(f"🔥 Fire Deaths: {self.stats.get('fire_deaths', 0)}")
+        print(f"🐌 Snail Deaths: {self.stats.get('snail_deaths', 0)}")
+        
+        if self.stats['best_dungeon']['steps'] != float('inf'):
+            print("\n⭐ Best Run:")
+            print(f"   Steps: {self.stats['best_dungeon']['steps']}")
+            print(f"   Treasures: {self.stats['best_dungeon']['treasures']}")
+        
+        # Show evolution progress
+        completed = self.stats['dungeons_completed']
+        if completed <= 33:
+            if completed <= 2:
+                next_at = 3
+                next_name = "Learner"
+            elif completed <= 7:
+                next_at = 8
+                next_name = "Chef"
+            elif completed <= 12:
+                next_at = 13
+                next_name = "Firefighter"
+            elif completed <= 17:
+                next_at = 18
+                next_name = "Police Officer"
+            elif completed <= 23:
+                next_at = 24
+                next_name = "Ninja"
+            elif completed <= 27:
+                next_at = 28
+                next_name = "Wizard"
+            else:
+                next_at = 34
+                next_name = "Superhero"
+            
+            print(f"\n⬆️  Next Evolution: {next_name} at {next_at} dungeons")
+            print(f"   ({next_at - completed} more to go!)")
+        else:
+            print("\n🏆 MAX EVOLUTION REACHED!")
+        
+        if self.stats['last_played']:
+            print(f"\n🕐 Last Played: {self.stats['last_played']}")
+        print("=" * 50)
+
+def show_menu():
+    """Display main menu"""
+    print("\n" + "=" * 50)
+    print("  🔥🐌 FIREBALL & SNAIL DUNGEON 🐌🔥")
+    print("=" * 50)
+    print("1. 🎲 New Dungeon")
+    print("2. 📊 View Statistics")
+    print("3. ❓ How to Play")
+    print("4. 🚪 Exit")
+    print("=" * 50)
+
+def show_instructions():
+    """Display game instructions"""
+    print("\n" + "=" * 50)
+    print("📖 HOW TO PLAY")
+    print("=" * 50)
+    print("🎯 Objective:")
+    print("   • Collect all 💎 treasures")
+    print("   • Find the 🚪 exit to escape")
+    print("\n🔥 FIREBALL MONSTERS:")
+    print("   • 👾 Monsters shoot fire in all 4 directions")
+    print("   • Fire cycles: 3 turns ON, 3 turns OFF")
+    print("   • 🔥 Fire tiles = INSTANT DEATH")
+    print("\n🐌 STALKER SNAIL:")
+    print("   • Appears at dungeon level 7")
+    print("   • Moves toward you using pathfinding")
+    print("   • Initial speed: moves every 10 player turns")
+    print("   • Speeds up every 5 levels (9,8,7... down to 3)")
+    print("   • Touching the snail = INSTANT DEATH")
+    print("\n🎮 Controls: W/A/S/D move | Q quit")
+    print("=" * 50)
+
+def play_dungeon(stats_manager):
+    """Play a single dungeon"""
+    game = RandomDungeon(stats_manager)
+    game.run()
+    
+    # Check outcome
+    if game.game_over:
+        won = False
+        death_cause = game.death_cause
+    else:
+        won = (game.treasure_found == game.total_treasures)
+        death_cause = None
+    
+    # Update stats
+    stats_manager.update_after_dungeon(
+        game.steps_taken, 
+        game.treasure_found, 
+        won,
+        death_cause
+    )
+    
+    return won, death_cause
+
+def main():
+    """Main game loop with menu and persistence"""
+    stats_manager = StatsManager()
+    
+    while True:
+        show_menu()
+        choice = input("Choose an option (1-4): ").strip()
+        
+        if choice == "1":
+            # Play dungeon
+            won, death_cause = play_dungeon(stats_manager)
+            
+            # Show completion dialogue
+            print("\n" + "=" * 50)
+            if won:
+                print("🎉 DUNGEON COMPLETE! 🎉")
+            elif death_cause == 'snail':
+                print("🐌 You were SNAIL SLIME! 🐌")
+            elif death_cause == 'fire':
+                print("🔥 You were BURNED! 🔥")
+            else:
+                print("🏳️ Dungeon abandoned...")
+            
+            print("\nWhat would you like to do?")
+            print("1. 🎲 Play Another Dungeon")
+            print("2. 📊 View Stats")
+            print("3. 🚪 Main Menu")
+            
+            while True:
+                post_choice = input("\n> ").strip()
+                if post_choice == "1":
+                    won, death_cause = play_dungeon(stats_manager)
+                    print("\n" + "=" * 50)
+                    if won:
+                        print("🎉 DUNGEON COMPLETE! 🎉")
+                    elif death_cause == 'snail':
+                        print("🐌 You were SNAIL SLIME! 🐌")
+                    elif death_cause == 'fire':
+                        print("🔥 You were BURNED! 🔥")
+                    else:
+                        print("🏳️ Dungeon abandoned...")
+                elif post_choice == "2":
+                    stats_manager.display_stats()
+                    input("\nPress Enter to continue...")
+                    break
+                elif post_choice == "3":
+                    break
+                else:
+                    print("Invalid choice. Use 1, 2, or 3")
+        
+        elif choice == "2":
+            stats_manager.display_stats()
+            input("\nPress Enter to continue...")
+        
+        elif choice == "3":
+            show_instructions()
+            input("\nPress Enter to continue...")
+        
+        elif choice == "4":
+            print("\nThanks for playing!")
+            avatar = stats_manager.get_avatar_name()
+            print(f"Final Avatar: {avatar}")
+            print(f"Final Stats: {stats_manager.stats['total_wins']} wins")
+            print(f"             {stats_manager.stats['dungeons_completed']} dungeons")
+            print(f"             {stats_manager.stats.get('snail_deaths', 0)} snail deaths")
+            print(f"             {stats_manager.stats.get('fire_deaths', 0)} fire deaths")
+            stats_manager.save_stats()
+            break
+        
+        else:
+            print("Invalid choice. Please enter 1-4")
+
+if __name__ == "__main__":
+    main()
